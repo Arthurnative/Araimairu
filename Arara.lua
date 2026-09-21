@@ -20,7 +20,7 @@ local PlayerGui = Player:WaitForChild("PlayerGui", 15)
 -- CONFIG
 ----------------------------------------------------------------------
 local CONFIG = {
-	VERSION = "2.3.3",
+	VERSION = "2.3.4",
 	CONFIG_DIR = "SBOR_Configs",
 
 	-- Combat / movement
@@ -1043,210 +1043,279 @@ local function isBlocked(userId)
 end
 
 local function getButtonText(btn)
-	local text = ""
+	local texts = {}
 	pcall(function()
-		if btn:IsA("TextButton") then
-			text = btn.Text or ""
+		if btn:IsA("TextButton") and btn.Text and btn.Text ~= "" then
+			table.insert(texts, tostring(btn.Text))
 		end
 	end)
-	if text == "" then
-		pcall(function()
-			for _, d in ipairs(btn:GetDescendants()) do
-				if d:IsA("TextLabel") or d:IsA("TextButton") then
-					local t = tostring(d.Text or "")
-					if t ~= "" then
-						text = t
-						break
-					end
-				end
+	pcall(function()
+		for _, d in ipairs(btn:GetDescendants()) do
+			if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text and d.Text ~= "" then
+				table.insert(texts, tostring(d.Text))
 			end
-		end)
-	end
-	return string.lower((text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+		end
+	end)
+	return texts
 end
 
-local function sendClickAt(x, y)
-	-- Desktop mouse APIs
+local function normalizeText(t)
+	return string.lower((tostring(t or "")):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function sendTap(x, y)
+	-- Common PC exploit APIs
+	pcall(function() if mousemoveabs then mousemoveabs(x, y) end end)
+	pcall(function() if mouse1click then mouse1click() end end)
 	pcall(function()
-		if mousemoveabs then mousemoveabs(x, y) end
-	end)
-	pcall(function()
-		if mouse1click then mouse1click() return end
 		if mouse1press and mouse1release then
-			mouse1press()
-			task.wait(0.03)
-			mouse1release()
+			mouse1press(); task.wait(0.04); mouse1release()
 		end
 	end)
-	-- VirtualInputManager (works on many executors + some mobile bridges)
+	-- Generic names some Android bridges expose
+	pcall(function() if tap then tap(x, y) end end)
+	pcall(function() if touchclick then touchclick(x, y) end end)
+	pcall(function() if mouse_click then mouse_click(x, y) end end)
+	-- VirtualInputManager variants
 	pcall(function()
 		local vim = game:GetService("VirtualInputManager")
 		vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
-		task.wait(0.04)
+		task.wait(0.05)
 		vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
 	end)
-	-- Touch (Android / emulator / mobile executor)
 	pcall(function()
 		local vim = game:GetService("VirtualInputManager")
-		vim:SendTouchEvent(x, y, 0, true)  -- touch begin
-		task.wait(0.05)
-		vim:SendTouchEvent(x, y, 0, false) -- touch end
+		vim:SendTouchEvent(x, y, 0, true)
+		task.wait(0.06)
+		vim:SendTouchEvent(x, y, 0, false)
 	end)
 	pcall(function()
 		local vim = game:GetService("VirtualInputManager")
-		-- Some versions use different arg order
 		vim:SendTouchEvent(0, true, Vector2.new(x, y))
-		task.wait(0.05)
+		task.wait(0.06)
 		vim:SendTouchEvent(0, false, Vector2.new(x, y))
+	end)
+	-- Input object injection (rare but try)
+	pcall(function()
+		local vim = game:GetService("VirtualInputManager")
+		vim:SendMouseMoveEvent(x, y, game)
+		task.wait(0.02)
+		vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+		task.wait(0.05)
+		vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+	end)
+end
+
+local function fireButtonSignals(btn)
+	pcall(function()
+		if firesignal then
+			pcall(function() firesignal(btn.MouseButton1Down) end)
+			pcall(function() firesignal(btn.MouseButton1Up) end)
+			pcall(function() firesignal(btn.MouseButton1Click) end)
+			pcall(function() firesignal(btn.Activated) end)
+		end
+	end)
+	pcall(function()
+		if getconnections then
+			for _, name in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }) do
+				local ok, list = pcall(function() return getconnections(btn[name]) end)
+				if ok and type(list) == "table" then
+					for _, c in ipairs(list) do
+						pcall(function()
+							if type(c.Function) == "function" then c.Function() end
+							if c.Fire then c:Fire() end
+						end)
+					end
+				end
+			end
+		end
+	end)
+	pcall(function()
+		if typeof(btn.Activate) == "function" then btn:Activate() end
 	end)
 end
 
 local function clickGuiButton(btn)
 	if not btn then return false end
-	local okAny = false
-
-	-- 1) Signal / connection fire
+	fireButtonSignals(btn)
 	pcall(function()
-		if firesignal then
-			pcall(function() firesignal(btn.MouseButton1Click) end)
-			pcall(function() firesignal(btn.MouseButton1Down) end)
-			pcall(function() firesignal(btn.MouseButton1Up) end)
-			pcall(function() firesignal(btn.Activated) end)
-			okAny = true
+		local pos = btn.AbsolutePosition
+		local size = btn.AbsoluteSize
+		if size.X >= 2 and size.Y >= 2 then
+			sendTap(pos.X + size.X * 0.5, pos.Y + size.Y * 0.5)
+		end
+	end)
+	return true
+end
+
+-- Score button text: higher = better (prefer exact "Block")
+local function scoreBlockText(t)
+	t = normalizeText(t)
+	if t == "block" then return 100 end
+	if t == "block and report" then return 40 end
+	if t:find("block") and not t:find("cancel") and not t:find("unblock") then return 60 end
+	return 0
+end
+
+local function findBlockButtons()
+	local results = {} -- {btn, score}
+	local CoreGui = game:GetService("CoreGui")
+
+	local function considerButton(btn)
+		if not (btn:IsA("TextButton") or btn:IsA("ImageButton") or btn:IsA("GuiButton")) then
+			return
+		end
+		local best = 0
+		for _, t in ipairs(getButtonText(btn)) do
+			best = math.max(best, scoreBlockText(t))
+		end
+		-- Name-based fallback
+		pcall(function()
+			local n = normalizeText(btn.Name)
+			if n:find("block") and not n:find("cancel") then
+				best = math.max(best, 50)
+			end
+		end)
+		if best > 0 then
+			local sizeOk = true
+			pcall(function()
+				if btn.AbsoluteSize.X < 2 or btn.AbsoluteSize.Y < 2 then sizeOk = false end
+			end)
+			if sizeOk then
+				table.insert(results, { Button = btn, Score = best })
+			end
+		end
+	end
+
+	pcall(function()
+		for _, d in ipairs(CoreGui:GetDescendants()) do
+			considerButton(d)
 		end
 	end)
 	pcall(function()
-		if getconnections then
-			for _, sigName in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up", "MouseButton1Click" }) do
-				local ok, conns = pcall(function() return getconnections(btn[sigName]) end)
-				if ok and type(conns) == "table" then
-					for _, c in ipairs(conns) do
-						pcall(function()
-							if c.Function then c.Function() end
-							if c.Fire then c:Fire() end
-							if c.fire then c:fire() end
-						end)
-						okAny = true
+		if PlayerGui then
+			for _, d in ipairs(PlayerGui:GetDescendants()) do
+				considerButton(d)
+			end
+		end
+	end)
+
+	-- Also: TextLabel "Block" → parent button
+	pcall(function()
+		for _, d in ipairs(CoreGui:GetDescendants()) do
+			if d:IsA("TextLabel") then
+				local s = scoreBlockText(d.Text)
+				if s > 0 then
+					local p = d.Parent
+					for _ = 1, 8 do
+						if not p then break end
+						if p:IsA("TextButton") or p:IsA("ImageButton") or p:IsA("GuiButton") then
+							table.insert(results, { Button = p, Score = s })
+							break
+						end
+						p = p.Parent
 					end
 				end
 			end
 		end
 	end)
-	pcall(function()
-		if typeof(btn.Activate) == "function" then
-			btn:Activate()
-			okAny = true
-		end
-	end)
 
-	-- 2) Physical click / touch at center
-	pcall(function()
-		local pos = btn.AbsolutePosition
-		local size = btn.AbsoluteSize
-		if size.X > 2 and size.Y > 2 then
-			local cx = pos.X + size.X * 0.5
-			local cy = pos.Y + size.Y * 0.5
-			-- Gui inset correction sometimes needed
-			sendClickAt(cx, cy)
-			okAny = true
-		end
-	end)
+	table.sort(results, function(a, b) return a.Score > b.Score end)
 
-	return okAny
+	-- Dedupe
+	local out, seen = {}, {}
+	for _, r in ipairs(results) do
+		if not seen[r.Button] then
+			seen[r.Button] = true
+			table.insert(out, r.Button)
+		end
+	end
+	return out
 end
 
-local function findBlockButtons()
-	local exact, soft = {}, {}
-	local seen = {}
-
-	local function consider(inst)
-		if not inst or seen[inst] then return end
-		local isBtn = inst:IsA("TextButton") or inst:IsA("ImageButton") or inst:IsA("GuiButton")
-		-- Also: TextLabel "Block" → climb to clickable parent
-		local text = ""
-		if isBtn then
-			text = getButtonText(inst)
-		elseif inst:IsA("TextLabel") then
-			text = string.lower(tostring(inst.Text or ""):gsub("^%s+", ""):gsub("%s+$", ""))
-		else
-			return
-		end
-		if text == "" or text == "cancel" or text:find("cancel") then return end
-
-		local target = inst
-		if not isBtn then
-			local p = inst.Parent
-			for _ = 1, 6 do
-				if not p then break end
-				if p:IsA("TextButton") or p:IsA("ImageButton") or p:IsA("GuiButton") then
-					target = p
+-- Fallback: find dialog by title, click first button by Y position
+local function tryClickBlockByLayout()
+	local CoreGui = game:GetService("CoreGui")
+	local titleLabel = nil
+	pcall(function()
+		for _, d in ipairs(CoreGui:GetDescendants()) do
+			if d:IsA("TextLabel") then
+				local t = tostring(d.Text or "")
+				if t:find("^Block ") or t:find("Block .+%?") then
+					titleLabel = d
 					break
 				end
-				p = p.Parent
-			end
-			if target == inst then return end
-		end
-		if seen[target] then return end
-		seen[target] = true
-
-		if text == "block" then
-			table.insert(exact, target)
-		elseif text:find("block") and not text:find("report") then
-			table.insert(exact, target)
-		elseif text:find("block") then
-			table.insert(soft, target)
-		end
-	end
-
-	local function scan(parent, depth)
-		if depth > 14 or not parent then return end
-		pcall(function()
-			for _, ch in ipairs(parent:GetChildren()) do
-				consider(ch)
-				scan(ch, depth + 1)
-			end
-		end)
-	end
-
-	pcall(function()
-		local CoreGui = game:GetService("CoreGui")
-		for _, top in ipairs(CoreGui:GetChildren()) do
-			scan(top, 0)
-		end
-	end)
-	pcall(function()
-		if PlayerGui then
-			for _, top in ipairs(PlayerGui:GetChildren()) do
-				scan(top, 0)
 			end
 		end
 	end)
+	if not titleLabel then return false end
 
-	local list = {}
-	for _, b in ipairs(exact) do table.insert(list, b) end
-	for _, b in ipairs(soft) do table.insert(list, b) end
-	return list
+	-- Walk up to a large frame
+	local root = titleLabel
+	for _ = 1, 10 do
+		if not root.Parent or root.Parent == CoreGui then break end
+		root = root.Parent
+		local sz = root.AbsoluteSize
+		if sz.X > 200 and sz.Y > 200 then break end
+	end
+
+	local candidates = {}
+	pcall(function()
+		for _, d in ipairs(root:GetDescendants()) do
+			if d:IsA("TextButton") or d:IsA("ImageButton") then
+				local texts = getButtonText(d)
+				local joined = normalizeText(table.concat(texts, " "))
+				if joined:find("cancel") then
+					-- skip
+				else
+					table.insert(candidates, d)
+				end
+			end
+		end
+	end)
+	table.sort(candidates, function(a, b)
+		return a.AbsolutePosition.Y < b.AbsolutePosition.Y
+	end)
+
+	-- First button under title is usually "Block"
+	if #candidates > 0 then
+		print("[AutoBlock] layout fallback click:", candidates[1]:GetFullName())
+		clickGuiButton(candidates[1])
+		return true
+	end
+	return false
 end
 
 local function AutoConfirmBlock()
 	task.spawn(function()
-		local deadline = os.clock() + 8
+		print("[AutoBlock] waiting for Block dialog...")
+		local deadline = os.clock() + 10
+		local clicked = false
 		while os.clock() < deadline do
 			local buttons = findBlockButtons()
-			for _, btn in ipairs(buttons) do
-				-- Prefer visible, on-screen buttons
-				local vis = true
-				pcall(function()
-					if btn.AbsoluteSize.X < 2 or btn.AbsoluteSize.Y < 2 then vis = false end
-				end)
-				if not vis then continue end
-				clickGuiButton(btn)
-				task.wait(0.15)
-				clickGuiButton(btn)
-				task.wait(0.25)
-				-- If dialog still there, try next candidate
+			if #buttons > 0 then
+				print("[AutoBlock] found", #buttons, "candidate(s):", buttons[1]:GetFullName())
+				for i = 1, math.min(3, #buttons) do
+					clickGuiButton(buttons[i])
+					task.wait(0.2)
+				end
+				clicked = true
+				task.wait(0.4)
+				-- re-check if dialog gone
+				if #findBlockButtons() == 0 then
+					print("[AutoBlock] dialog closed")
+					return
+				end
+			else
+				if tryClickBlockByLayout() then
+					clicked = true
+					task.wait(0.4)
+				end
 			end
-			task.wait(0.15)
+			task.wait(0.2)
+		end
+		if not clicked then
+			print("[AutoBlock] no Block button found (MuMu/CoreGui may block injection)")
 		end
 	end)
 end

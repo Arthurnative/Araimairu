@@ -1,6 +1,6 @@
 --[[
 	SBO:R Auto Farm
-	Clean rebuild — Custom Path only, multi-floor, priority-driven
+	Clean rebuild - Custom Path only, multi-floor, priority-driven
 ]]
 
 local Players            = game:GetService("Players")
@@ -14,13 +14,16 @@ local VirtualUser        = game:GetService("VirtualUser")
 local TeleportService    = game:GetService("TeleportService")
 
 local Player    = Players.LocalPlayer
-local PlayerGui = Player:WaitForChild("PlayerGui", 15)
+local PlayerGui = Player:WaitForChild("PlayerGui", 30)
+if not PlayerGui then
+	error("[SBOR Auto Farm] PlayerGui not found")
+end
 
 ----------------------------------------------------------------------
 -- CONFIG
 ----------------------------------------------------------------------
 local CONFIG = {
-	VERSION = "2.3.4",
+	VERSION = "2.3.5",
 	CONFIG_DIR = "SBOR_Configs",
 
 	-- Combat / movement
@@ -171,7 +174,7 @@ local function GetFloorDisplayName()
 end
 
 local function GetHeaderSubtitle()
-	return GetFloorDisplayName() .. "  ·  " .. tostring(game.PlaceId)
+	return GetFloorDisplayName() .. "  |  " .. tostring(game.PlaceId)
 end
 
 ----------------------------------------------------------------------
@@ -547,11 +550,11 @@ local function GetClosestPriorityMob()
 		local p = GetMobPriority(mob)
 		if not p then
 			ValidMobs[mob] = nil
-			continue
-		end
-		local d = GetMobDistance(mob)
-		if p < bestP or (p == bestP and d < bestD) then
-			bestP, bestD, best = p, d, mob
+		else
+			local d = GetMobDistance(mob)
+			if p < bestP or (p == bestP and d < bestD) then
+				bestP, bestD, best = p, d, mob
+			end
 		end
 	end
 	return best
@@ -562,11 +565,12 @@ local function GetDetectedEntities()
 	if not folder then return {} end
 	local set = {}
 	for _, mob in folder:GetChildren() do
-		if not mob:IsA("Model") then continue end
-		local cfg = mob:FindFirstChild("Config")
-		local ent = cfg and cfg:FindFirstChild("Entity")
-		if ent and type(ent.Value) == "string" and ent.Value ~= "" then
-			set[ent.Value] = true
+		if mob:IsA("Model") then
+			local cfg = mob:FindFirstChild("Config")
+			local ent = cfg and cfg:FindFirstChild("Entity")
+			if ent and type(ent.Value) == "string" and ent.Value ~= "" then
+				set[ent.Value] = true
+			end
 		end
 	end
 	local list = {}
@@ -619,12 +623,13 @@ local function GetNearbyCombatMobs(target)
 	if c and now - c.Time < CONFIG.COMBAT_GROUP_CACHE_INTERVAL then return c.Mobs end
 	local nearby = { [target] = true }
 	for mob in ValidMobs do
-		if mob == target then continue end
-		local hum = mob:FindFirstChildOfClass("Humanoid")
-		local mroot = mob:FindFirstChild("HumanoidRootPart")
-		if hum and mroot and hum.Health > 0
-			and horizDist(root.Position, mroot.Position) <= CONFIG.GROUP_DANGER_DISTANCE then
-			nearby[mob] = true
+		if mob ~= target then
+			local hum = mob:FindFirstChildOfClass("Humanoid")
+			local mroot = mob:FindFirstChild("HumanoidRootPart")
+			if hum and mroot and hum.Health > 0
+				and horizDist(root.Position, mroot.Position) <= CONFIG.GROUP_DANGER_DISTANCE then
+				nearby[mob] = true
+			end
 		end
 	end
 	local result = {}
@@ -665,14 +670,15 @@ local function GetBladeDangerData(target)
 	local danger = GetBladeDangerDistance()
 	for _, blade in GetCombatBladeParts(target) do
 		local pt, dist = GetClosestPointOnBlade(blade, RootPart.Position)
-		if not pt then continue end
-		local eff = dist - danger
-		if eff < closest then closest = eff end
-		if dist <= danger then
-			local off = RootPart.Position - pt
-			local h = Vector3.new(off.X, 0, off.Z)
-			if h.Magnitude > 0.01 then
-				push += h.Unit * math.max(danger - dist, 0.1)
+		if pt then
+			local eff = dist - danger
+			if eff < closest then closest = eff end
+			if dist <= danger then
+				local off = RootPart.Position - pt
+				local h = Vector3.new(off.X, 0, off.Z)
+				if h.Magnitude > 0.01 then
+					push = push + (h.Unit * math.max(danger - dist, 0.1))
+				end
 			end
 		end
 	end
@@ -728,13 +734,12 @@ local function GetSafeCombatPosition(target)
 		local ang = (math.pi * 2 / CONFIG.SAFE_COMBAT_DIRECTIONS) * i
 		local dir = Vector3.new(math.cos(ang), 0, math.sin(ang))
 		local cand = troot.Position + dir * combatDist
-		if not IsInsideFarmArea(cand) or IsWaterAt(cand, target)
-			or IsPathThroughDeadzone(cand) or not IsPositionSafeFromBlades(cand, target) then
-			continue
+		if IsInsideFarmArea(cand) and not IsWaterAt(cand, target)
+			and not IsPathThroughDeadzone(cand) and IsPositionSafeFromBlades(cand, target) then
+			local dot = math.clamp(curDir:Dot(dir), -1, 1)
+			local score = (cand - RootPart.Position).Magnitude + (1 - dot) * combatDist * 0.35
+			table.insert(candidates, { Position = cand, Score = score })
 		end
-		local dot = math.clamp(curDir:Dot(dir), -1, 1)
-		local score = (cand - RootPart.Position).Magnitude + (1 - dot) * combatDist * 0.35
-		table.insert(candidates, { Position = cand, Score = score })
 	end
 	table.sort(candidates, function(a, b) return a.Score < b.Score end)
 	local maxT = math.min(CONFIG.SAFE_COMBAT_MAX_PATH_TESTS, #candidates)
@@ -766,18 +771,21 @@ local function GetNearbyThreatMob(targetMob)
 	look = look.Unit
 	local best, bestD = nil, math.huge
 	for mob in ValidMobs do
-		if mob == targetMob then continue end
-		local hum = mob:FindFirstChildOfClass("Humanoid")
-		local root = mob:FindFirstChild("HumanoidRootPart")
-		if not hum or not root or hum.Health <= 0 then continue end
-		local off = root.Position - RootPart.Position
-		local h = Vector3.new(off.X, 0, off.Z)
-		local d = h.Magnitude
-		if d <= 0.01 or d > CONFIG.THREAT_DETECTION_DISTANCE then continue end
-		local dir = h.Unit
-		local ang = math.deg(math.acos(math.clamp(look:Dot(dir), -1, 1)))
-		if ang >= CONFIG.THREAT_ANGLE and d < bestD then
-			best, bestD = mob, d
+		if mob ~= targetMob then
+			local hum = mob:FindFirstChildOfClass("Humanoid")
+			local root = mob:FindFirstChild("HumanoidRootPart")
+			if hum and root and hum.Health > 0 then
+				local off = root.Position - RootPart.Position
+				local h = Vector3.new(off.X, 0, off.Z)
+				local d = h.Magnitude
+				if d > 0.01 and d <= CONFIG.THREAT_DETECTION_DISTANCE then
+					local dir = h.Unit
+					local ang = math.deg(math.acos(math.clamp(look:Dot(dir), -1, 1)))
+					if ang >= CONFIG.THREAT_ANGLE and d < bestD then
+						best, bestD = mob, d
+					end
+				end
+			end
 		end
 	end
 	return best, bestD
@@ -800,13 +808,14 @@ local function GetThreatEscapePos(targetMob, threatMob)
 	}
 	for _, dir in ipairs(dirs) do
 		dir = Vector3.new(dir.X, 0, dir.Z)
-		if dir.Magnitude <= 0.01 then continue end
-		dir = dir.Unit
-		local cand = RootPart.Position + dir * CONFIG.THREAT_ESCAPE_DISTANCE
-		if IsInsideFarmArea(cand) and not IsWaterAt(cand, targetMob)
-			and not IsPathThroughWater(cand) and not IsPathThroughDeadzone(cand)
-			and IsSafePathClear(cand, targetMob) then
-			return cand
+		if dir.Magnitude > 0.01 then
+			dir = dir.Unit
+			local cand = RootPart.Position + dir * CONFIG.THREAT_ESCAPE_DISTANCE
+			if IsInsideFarmArea(cand) and not IsWaterAt(cand, targetMob)
+				and not IsPathThroughWater(cand) and not IsPathThroughDeadzone(cand)
+				and IsSafePathClear(cand, targetMob) then
+				return cand
+			end
 		end
 	end
 	return nil
@@ -1500,7 +1509,7 @@ end
 
 local _autoSaveToken = 0
 local function AutoSaveConfig()
-	_autoSaveToken += 1
+	_autoSaveToken = _autoSaveToken + 1
 	local token = _autoSaveToken
 	task.delay(0.6, function()
 		if token ~= _autoSaveToken then return end
@@ -1590,7 +1599,7 @@ end)
 
 Player.CharacterAdded:Connect(function()
 	task.wait()
-	DEATH_COUNT += 1
+	DEATH_COUNT = DEATH_COUNT + 1
 	CONFIG.CurrentWaypoint = 1
 	ResetCombatLock()
 	-- path restarts from respawn after death
@@ -1626,7 +1635,7 @@ ToggleBtn.Size = UDim2.fromOffset(44, 44)
 ToggleBtn.Position = UDim2.new(1, -58, 0, 12)
 ToggleBtn.BackgroundColor3 = CONFIG.UI_PANEL
 ToggleBtn.BorderSizePixel = 0
-ToggleBtn.Text = "☰"
+ToggleBtn.Text = "="
 ToggleBtn.TextColor3 = CONFIG.UI_TEXT
 ToggleBtn.TextSize = 20
 ToggleBtn.Font = Enum.Font.GothamBold
@@ -1721,7 +1730,7 @@ contentPad.PaddingBottom = UDim.new(0, 12)
 
 local layoutOrder = 0
 local function nextOrder()
-	layoutOrder += 1
+	layoutOrder = layoutOrder + 1
 	return layoutOrder
 end
 
@@ -1924,9 +1933,9 @@ local function rebuildPriorityUI()
 			Instance.new("UICorner", b).CornerRadius = UDim.new(0, 4)
 			return b
 		end
-		local up = smallBtn("▲", -90)
-		local down = smallBtn("▼", -60)
-		local rm = smallBtn("×", -30)
+		local up = smallBtn("^", -90)
+		local down = smallBtn("v", -60)
+		local rm = smallBtn("x", -30)
 		up.Activated:Connect(function()
 			if i <= 1 then return end
 			CONFIG.TARGET_ENTITY_PRIORITY[i], CONFIG.TARGET_ENTITY_PRIORITY[i - 1] =
@@ -2058,8 +2067,8 @@ local function entityPathBtn(text)
 	return b
 end
 
-local PrevEntityBtn = entityPathBtn("◀ Prev target")
-local NextEntityBtn = entityPathBtn("Next target ▶")
+local PrevEntityBtn = entityPathBtn("< Prev target")
+local NextEntityBtn = entityPathBtn("Next target >")
 
 local PathToolbar = Instance.new("Frame")
 PathToolbar.LayoutOrder = nextOrder()
@@ -2148,7 +2157,7 @@ local function refreshPathUI()
 		act.Position = UDim2.new(1, -90, 0.5, -11)
 		act.BackgroundColor3 = CONFIG.UI_HOVER
 		act.BorderSizePixel = 0
-		act.Text = wp.Action == "Interact" and "X" or "—"
+		act.Text = wp.Action == "Interact" and "X" or "-"
 		act.TextColor3 = wp.Action == "Interact" and CONFIG.UI_ACCENT or CONFIG.UI_MUTED
 		act.Font = Enum.Font.GothamBold
 		act.TextSize = 11
@@ -2163,7 +2172,7 @@ local function refreshPathUI()
 		del.Position = UDim2.new(1, -28, 0.5, -11)
 		del.BackgroundColor3 = CONFIG.UI_HOVER
 		del.BorderSizePixel = 0
-		del.Text = "×"
+		del.Text = "x"
 		del.TextColor3 = CONFIG.UI_TEXT
 		del.Font = Enum.Font.GothamBold
 		del.TextSize = 12
@@ -2633,7 +2642,7 @@ RunService.Heartbeat:Connect(function()
 					LAST_PATH_INTERACT = now
 					InputBindableFunction:Invoke("InteractButton", Enum.UserInputState.Begin)
 				end
-				CONFIG.CurrentWaypoint += 1
+				CONFIG.CurrentWaypoint = CONFIG.CurrentWaypoint + 1
 			else
 				if FaceOrientation then FaceOrientation.Enabled = false end
 				Humanoid.AutoRotate = true

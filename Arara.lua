@@ -20,7 +20,7 @@ local PlayerGui = Player:WaitForChild("PlayerGui", 15)
 -- CONFIG
 ----------------------------------------------------------------------
 local CONFIG = {
-	VERSION = "2.3.0",
+	VERSION = "2.3.2",
 	CONFIG_DIR = "SBOR_Configs",
 
 	-- Combat / movement
@@ -115,21 +115,21 @@ local CONFIG = {
 -- STATE
 ----------------------------------------------------------------------
 local Feature = {
-	AutoFarm        = true,
-	AutoBlock       = true,
-	SafeCombat      = true,
-	AutoPatrol      = true,
-	AutoSkill       = true,
+	AutoFarm        = false,
+	AutoBlock       = false,
+	SafeCombat      = false,
+	AutoPatrol      = false,
+	AutoSkill       = false,
 	IgnoreFarmZone  = false,
-	ResetOnBoostOut = true,
-	AntiAfk         = true,
+	ResetOnBoostOut = false,
+	AntiAfk         = false,
 }
 
 local Character, Humanoid, RootPart
 local ClosestTarget = nil
 local ValidMobs = {}
 local DEATH_COUNT = 0
-local Enabled = true
+local Enabled = false
 local Equipped = false
 local RETREATING = false
 local InputBindableFunction = nil
@@ -1042,62 +1042,147 @@ local function isBlocked(userId)
 	return false
 end
 
+local function getButtonText(btn)
+	local text = ""
+	pcall(function()
+		if btn:IsA("TextButton") then
+			text = btn.Text or ""
+		end
+	end)
+	if text == "" then
+		pcall(function()
+			for _, d in ipairs(btn:GetDescendants()) do
+				if d:IsA("TextLabel") or d:IsA("TextButton") then
+					local t = d.Text or ""
+					if t ~= "" then
+						text = t
+						break
+					end
+				end
+			end
+		end)
+	end
+	return string.lower(text or "")
+end
+
 local function clickGuiButton(btn)
-	if not btn then return end
+	if not btn then return false end
+	local clicked = false
 	pcall(function()
 		if firesignal then
-			if btn.MouseButton1Click then firesignal(btn.MouseButton1Click) end
-			if btn.Activated then firesignal(btn.Activated) end
+			pcall(function() firesignal(btn.MouseButton1Click) end)
+			pcall(function() firesignal(btn.MouseButton1Down) end)
+			pcall(function() firesignal(btn.MouseButton1Up) end)
+			pcall(function() firesignal(btn.Activated) end)
+			clicked = true
 		end
 	end)
 	pcall(function()
 		if getconnections then
-			for _, c in ipairs(getconnections(btn.MouseButton1Click) or {}) do pcall(c.Fire or c.fire or function() end) end
-			for _, c in ipairs(getconnections(btn.Activated) or {}) do pcall(c.Fire or c.fire or function() end) end
+			for _, sig in ipairs({ "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }) do
+				local ok, conns = pcall(function() return getconnections(btn[sig]) end)
+				if ok and conns then
+					for _, c in ipairs(conns) do
+						pcall(function()
+							if c.Fire then c:Fire() elseif c.fire then c:fire() end
+						end)
+						clicked = true
+					end
+				end
+			end
 		end
 	end)
-	pcall(function() btn:Activate() end)
+	pcall(function()
+		if typeof(btn.Activate) == "function" then
+			btn:Activate()
+			clicked = true
+		end
+	end)
+	-- Virtual click at center of button (helps some CoreGui prompts)
+	pcall(function()
+		local pos = btn.AbsolutePosition
+		local size = btn.AbsoluteSize
+		if size.X > 0 and size.Y > 0 then
+			local cx = pos.X + size.X / 2
+			local cy = pos.Y + size.Y / 2
+			if mousemoveabs then
+				mousemoveabs(cx, cy)
+				task.wait(0.05)
+			end
+			if mouse1click then
+				mouse1click()
+				clicked = true
+			elseif mouse1press and mouse1release then
+				mouse1press()
+				task.wait(0.05)
+				mouse1release()
+				clicked = true
+			end
+		end
+	end)
+	return clicked
 end
 
 local function AutoConfirmBlock()
 	task.spawn(function()
 		local CoreGui = game:GetService("CoreGui")
-		local deadline = os.clock() + 4
+		local deadline = os.clock() + 6
 		while os.clock() < deadline do
-			local candidates = {}
-			local function scan(parent, depth)
-				if depth > 8 or not parent then return end
-				for _, ch in ipairs(parent:GetChildren()) do
-					if ch:IsA("TextButton") or ch:IsA("ImageButton") then
-						local text, name = "", ""
-						pcall(function() text = string.lower(ch.Text or "") end)
-						pcall(function() name = string.lower(ch.Name or "") end)
-						if text:find("block") or text:find("confirm") or text == "yes"
-							or name:find("block") or name:find("confirm") then
-							table.insert(candidates, ch)
-						end
-					end
-					scan(ch, depth + 1)
+			local exactBlock = {} -- text is exactly "block"
+			local softBlock = {}  -- contains "block" but not cancel
+			local function consider(btn)
+				if not btn or not btn:IsA("GuiButton") then return end
+				local text = getButtonText(btn)
+				if text == "" then return end
+				if text == "cancel" or text:find("cancel") then return end
+				if text == "block" then
+					table.insert(exactBlock, btn)
+				elseif text:find("block") and not text:find("report") then
+					table.insert(exactBlock, btn) -- prefer plain block
+				elseif text:find("block") then
+					table.insert(softBlock, btn)
 				end
 			end
+			local function scan(parent, depth)
+				if depth > 12 or not parent then return end
+				pcall(function()
+					for _, ch in ipairs(parent:GetChildren()) do
+						if ch:IsA("TextButton") or ch:IsA("ImageButton") then
+							consider(ch)
+						end
+						scan(ch, depth + 1)
+					end
+				end)
+			end
 			pcall(function()
+				-- Full CoreGui scan (new block UI is not always under Prompt*)
 				for _, top in ipairs(CoreGui:GetChildren()) do
-					local n = top.Name or ""
-					if n:find("Prompt") or n:find("Block") or n:find("Dialog") or n:find("Roblox") then
-						scan(top, 0)
+					scan(top, 0)
+				end
+				-- PlayerGui overlays just in case
+				if PlayerGui then
+					for _, top in ipairs(PlayerGui:GetChildren()) do
+						local n = string.lower(top.Name or "")
+						if n:find("prompt") or n:find("block") or n:find("dialog") then
+							scan(top, 0)
+						end
 					end
 				end
 			end)
-			for _, btn in ipairs(candidates) do
-				local text = ""
-				pcall(function() text = string.lower(btn.Text or "") end)
-				if text:find("block") or text:find("confirm") or text == "yes" then
+
+			local order = {}
+			for _, b in ipairs(exactBlock) do table.insert(order, b) end
+			for _, b in ipairs(softBlock) do table.insert(order, b) end
+
+			for _, btn in ipairs(order) do
+				if clickGuiButton(btn) then
+					task.wait(0.2)
+					-- click again once in case first didn't register
 					clickGuiButton(btn)
 					return
 				end
 			end
-			if #candidates > 0 then clickGuiButton(candidates[1]); return end
-			task.wait(0.15)
+			task.wait(0.12)
 		end
 	end)
 end
@@ -1278,6 +1363,20 @@ local function SaveConfig(name)
 	if not ok then return false, enc end
 	local ok2, err = pcall(writefile, profilePath(name), enc)
 	return ok2, err
+end
+
+local _autoSaveToken = 0
+local function AutoSaveConfig()
+	_autoSaveToken += 1
+	local token = _autoSaveToken
+	task.delay(0.6, function()
+		if token ~= _autoSaveToken then return end
+		local name = "Place_" .. tostring(game.PlaceId)
+		local ok, err = SaveConfig(name)
+		if CfgStatus then
+			CfgStatus.Text = ok and "Auto-saved" or tostring(err):sub(1, 14)
+		end
+	end)
 end
 
 local function LoadConfig(name)
@@ -1465,7 +1564,7 @@ SubTitle.Parent = Header
 local StatusDot = Instance.new("Frame")
 StatusDot.Size = UDim2.fromOffset(10, 10)
 StatusDot.Position = UDim2.new(1, -28, 0.5, -5)
-StatusDot.BackgroundColor3 = CONFIG.UI_SUCCESS
+StatusDot.BackgroundColor3 = Feature.AutoFarm and CONFIG.UI_SUCCESS or CONFIG.UI_DANGER
 StatusDot.BorderSizePixel = 0
 StatusDot.Parent = Header
 Instance.new("UICorner", StatusDot).CornerRadius = UDim.new(1, 0)
@@ -1556,6 +1655,7 @@ local function makeToggle(label, key, defaultOn)
 		if key == "SafeCombat" then ResetCombatLock() end
 		refresh()
 		StatusDot.BackgroundColor3 = Feature.AutoFarm and CONFIG.UI_SUCCESS or CONFIG.UI_DANGER
+		if AutoSaveConfig then AutoSaveConfig() end
 	end)
 	return refresh
 end

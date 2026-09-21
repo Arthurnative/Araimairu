@@ -23,7 +23,7 @@ end
 -- CONFIG
 ----------------------------------------------------------------------
 local CONFIG = {
-	VERSION = "2.3.2R",
+	VERSION = "2.3.6",
 	CONFIG_DIR = "SBOR_Configs",
 
 	-- Combat / movement
@@ -1680,6 +1680,12 @@ local function rebuildPriorityUI()
 			if refreshPathUI then refreshPathUI() end
 		end)
 	end
+	if #CONFIG.TARGET_ENTITY_PRIORITY > 0 and not CONFIG.ActivePathEntity then
+		CONFIG.ActivePathEntity = CONFIG.TARGET_ENTITY_PRIORITY[1]
+	end
+	if #CONFIG.TARGET_ENTITY_PRIORITY > 0 and (not CONFIG.ActivePathEntity or CONFIG.ActivePathEntity == "") then
+		CONFIG.ActivePathEntity = CONFIG.TARGET_ENTITY_PRIORITY[1]
+	end
 	if refreshPathUI then task.defer(refreshPathUI) end
 end
 
@@ -1726,9 +1732,16 @@ local function refreshEnemyPicker()
 		b.Activated:Connect(function()
 			if IsEntityInPriority(name) then return end
 			table.insert(CONFIG.TARGET_ENTITY_PRIORITY, name)
+			if not CONFIG.ActivePathEntity then
+				CONFIG.ActivePathEntity = name
+			end
+			if not CONFIG.Paths[name] then
+				CONFIG.Paths[name] = { Waypoints = {}, FarmCenter = nil, FarmRadius = 200, DeadzoneCenter = nil, DeadzoneRadius = 35 }
+			end
 			ResetCombatLock()
 			rebuildPriorityUI()
 			refreshEnemyPicker()
+			if refreshPathUI then refreshPathUI() end
 		end)
 	end
 end
@@ -1839,15 +1852,18 @@ local pathListLayout = Instance.new("UIListLayout", PathList)
 pathListLayout.Padding = UDim.new(0, 3)
 
 local function refreshPathEntityLabel()
-	local name = GetEditPathEntity()
-	local farm = GetActiveFarmEntity()
-	if name then
-		local n = #GetEditWaypoints()
-		local mark = (farm == name) and " [FARMING]" or ""
-		PathEntityLabel.Text = "Editing path: " .. name .. "  (" .. n .. " pts)" .. mark
+	local name = CONFIG.ActivePathEntity or CONFIG.TARGET_ENTITY_PRIORITY[1]
+	local farm = CONFIG.TARGET_ENTITY_PRIORITY[1]
+	if name and name ~= "" then
 		CONFIG.ActivePathEntity = name
+		local wps = (CONFIG.Paths[name] and CONFIG.Paths[name].Waypoints) or {}
+		local n = #wps
+		local mark = (farm == name) and " [FARMING]" or ""
+		PathEntityLabel.Text = "Editing: " .. name .. "  (" .. n .. " pts)" .. mark
+		PathEntityLabel.TextColor3 = CONFIG.UI_ACCENT
 	else
-		PathEntityLabel.Text = "Path for: (add enemy to priority first)"
+		PathEntityLabel.Text = "Add an enemy to priority first"
+		PathEntityLabel.TextColor3 = CONFIG.UI_MUTED
 	end
 end
 
@@ -1855,7 +1871,11 @@ local function refreshPathUI()
 	for _, ch in PathList:GetChildren() do
 		if ch:IsA("GuiObject") and ch ~= pathListLayout then ch:Destroy() end
 	end
-	local wps = GetEditWaypoints()
+	local name = CONFIG.ActivePathEntity or CONFIG.TARGET_ENTITY_PRIORITY[1]
+	if name and not CONFIG.Paths[name] then
+		CONFIG.Paths[name] = { Waypoints = {}, FarmCenter = nil, FarmRadius = 200, DeadzoneCenter = nil, DeadzoneRadius = 35 }
+	end
+	local wps = (name and CONFIG.Paths[name] and CONFIG.Paths[name].Waypoints) or {}
 	PathCountLbl.Text = #wps .. " pts"
 	refreshPathEntityLabel()
 	for i, wp in ipairs(wps) do
@@ -1913,14 +1933,19 @@ local function cycleActiveEntity(dir)
 	local list = CONFIG.TARGET_ENTITY_PRIORITY
 	if #list == 0 then return end
 	local cur = CONFIG.ActivePathEntity or list[1]
-	local idx = table.find(list, cur) or 1
+	local idx = 1
+	for i, n in ipairs(list) do
+		if n == cur then idx = i break end
+	end
 	idx = idx + dir
 	if idx < 1 then idx = #list end
 	if idx > #list then idx = 1 end
 	CONFIG.ActivePathEntity = list[idx]
-	EnsurePath(list[idx])
+	if not CONFIG.Paths[list[idx]] then
+		CONFIG.Paths[list[idx]] = { Waypoints = {}, FarmCenter = nil, FarmRadius = 200, DeadzoneCenter = nil, DeadzoneRadius = 35 }
+	end
 	CONFIG.CurrentWaypoint = 1
-	SyncFarmFromPath()
+	if SyncFarmFromPath then SyncFarmFromPath() end
 	ResetCombatLock()
 	refreshPathUI()
 	if updateFarmInfo then updateFarmInfo() end
@@ -1930,28 +1955,53 @@ PrevEntityBtn.Activated:Connect(function() cycleActiveEntity(-1) end)
 NextEntityBtn.Activated:Connect(function() cycleActiveEntity(1) end)
 
 RecordBtn.Activated:Connect(function()
-	if not RootPart then return end
-	local name = GetEditPathEntity()
-	if not name then
-		PathEntityLabel.Text = "Add an enemy to priority first"
+	updateCharacter()
+	if not RootPart then
+		PathEntityLabel.Text = "No character / RootPart - try again"
+		PathEntityLabel.TextColor3 = CONFIG.UI_DANGER
 		return
 	end
-	local path = EnsurePath(name)
+	-- Prefer edit entity, else priority #1 (never fail if priority has items)
+	local name = CONFIG.ActivePathEntity
+	if not name or name == "" then
+		name = CONFIG.TARGET_ENTITY_PRIORITY[1]
+	end
+	if not name or name == "" then
+		PathEntityLabel.Text = "Add an enemy to priority first"
+		PathEntityLabel.TextColor3 = CONFIG.UI_DANGER
+		return
+	end
+	-- keep ActivePathEntity in sync
 	CONFIG.ActivePathEntity = name
+	if not CONFIG.Paths[name] then
+		CONFIG.Paths[name] = {
+			Waypoints = {},
+			FarmCenter = nil,
+			FarmRadius = 200,
+			DeadzoneCenter = nil,
+			DeadzoneRadius = 35,
+		}
+	end
+	local path = CONFIG.Paths[name]
+	if not path.Waypoints then path.Waypoints = {} end
 	local p = RootPart.Position
-	table.insert(path.Waypoints, { X = p.X, Y = p.Y, Z = p.Z, Action = "None", Label = "" })
-	refreshPathUI()
+	table.insert(path.Waypoints, {
+		X = p.X, Y = p.Y, Z = p.Z,
+		Action = "None",
+		Label = "",
+	})
+	PathEntityLabel.TextColor3 = CONFIG.UI_ACCENT
+	if refreshPathUI then refreshPathUI() end
 end)
 
 ClearPathBtn.Activated:Connect(function()
-	local name = GetEditPathEntity()
-	if not name then return end
-	local path = EnsurePath(name)
-	path.Waypoints = {}
-	if GetActiveFarmEntity() == name then
+	local name = CONFIG.ActivePathEntity or CONFIG.TARGET_ENTITY_PRIORITY[1]
+	if not name or not CONFIG.Paths[name] then return end
+	CONFIG.Paths[name].Waypoints = {}
+	if (CONFIG.TARGET_ENTITY_PRIORITY[1] == name) then
 		CONFIG.CurrentWaypoint = 1
 	end
-	refreshPathUI()
+	if refreshPathUI then refreshPathUI() end
 end)
 
 refreshPathUI()
